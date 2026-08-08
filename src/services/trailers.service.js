@@ -1,0 +1,40 @@
+const { createSimpleCrudService } = require('./simpleCrudFactory');
+
+module.exports = createSimpleCrudService({
+  table: 'trailers',
+  entityName: 'Trailer',
+  searchColumns: ['name', 'vin', 'license_number'],
+  filterColumns: ['carrier_id', 'terminal_id', 'trailer_type_id'],
+  columns: [
+    'name',
+    'carrier_id',
+    'contract_type_id',
+    'trailer_type_id',
+    'length',
+    'height',
+    'fleet_group_id',
+    'terminal_id',
+    'license_number',
+    'vin',
+    'make',
+    'model',
+    'make_year',
+    'license_state_id',
+    'license_exp',
+    'inspection_exp',
+    'registration_number',
+    'source_reference',
+    'integration_id',
+    'monthly_cost',
+    'in_service_from',
+    'is_active',
+    'notes',
+    'trailer_status_id',
+    'lease_start_date',
+    'lease_end_date',
+    'deactive_dt'
+  ],
+  requiredFields: ['name'],
+  isActiveColumn: 'is_active',
+  orderBy: 'name'
+});
