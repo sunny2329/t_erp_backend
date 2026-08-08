@@ -16,7 +16,13 @@ const pool = new Pool({
   database: process.env.DB_NAME,
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
-  ssl: String(process.env.DB_SSL).toLowerCase() === 'true' ? { rejectUnauthorized: false } : false
+  // `servername` forces the correct SNI hostname on the TLS ClientHello.
+  // Without it, some hosting platforms (Render, Vercel, etc.) resolve
+  // DB_HOST to a raw IP before connecting, and Supabase's Supavisor pooler
+  // can't tell which tenant/project the connection is for without SNI —
+  // it fails closed with "(ENOIDENTIFIER) no tenant identifier provided".
+  // Harmless locally, where DNS/TLS already happens to send SNI correctly.
+  ssl: String(process.env.DB_SSL).toLowerCase() === 'true' ? { rejectUnauthorized: false, servername: process.env.DB_HOST } : false
 });
 
 pool.on('error', (err) => {
