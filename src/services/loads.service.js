@@ -14,7 +14,13 @@ const eventsService = require('./events.service');
 // syncLoadStatus, matching the reference's dispatch-save rollup) AND
 // manually settable here via the Load Status dropdown (matching the
 // reference's separate `ss_save_changeloadstatus` manual path) — whichever
-// wrote it last wins, same as the reference project.
+// wrote it last wins, same as the reference project, EXCEPT for one guard
+// carried over from that same reference function: manually setting In
+// Transit(10) is rejected below (see `update()`) exactly like
+// ss_save_changeloadstatus blocks a 6->10 manual transition ("Cannot change
+// status without dispatching the load") — In Transit must come from an
+// actual dispatch/tracking-status action (loadAssignments.service.js), not
+// a bare field edit.
 
 const LOAD_COLUMNS = [
   'carrier_id',
@@ -337,6 +343,16 @@ async function create(payload, userId) {
 
 async function update(id, payload, userId) {
   const before = await getById(id);
+
+  if (payload.trip_status_type_id !== undefined) {
+    const nextTripStatus = Number(payload.trip_status_type_id);
+    if (nextTripStatus === loadAssignmentsService.TRIP_STATUS.IN_TRANSIT && before.trip_status_type_id !== nextTripStatus) {
+      throw new AppError(
+        "Load Status can't be set to In Transit directly — dispatch the split (or set its Tracking Status to In Transit) instead.",
+        400
+      );
+    }
+  }
 
   await withTransaction(async (client) => {
     await updateRow(client, { table: 'loads', columns: LOAD_COLUMNS }, id, payload, userId);

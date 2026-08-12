@@ -376,4 +376,4 @@ async function deleteLeg(legId, userId) {
   });
 }
 
-module.exports = { listByLoad, createLeg, updateLeg, deleteLeg, syncLoadStatus, stopIdsForSplit, checkConflicts };
+module.exports = { listByLoad, createLeg, updateLeg, deleteLeg, syncLoadStatus, stopIdsForSplit, checkConflicts, TRIP_STATUS };
