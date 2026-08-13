@@ -120,19 +120,28 @@ async function assertSplitHasStops(client, loadId, splitNo) {
 //      Completed (En Route, At Pickup, ..., Delivered, Detention, ...) and
 //      the load stays In Transit through all of them, not just while the
 //      leg's tracking literally still reads the dispatch value 5.
-//   2. else, if some MID-split (not the highest split_no) leg's tracking is
-//      Completed(13) (Case 4, "finish a mid-split"): only takes effect if
-//      the load's CURRENT trip status is Scheduled(6) or In Transit(10) — a
-//      load that's already Cancelled/Completed/Dropped/Open keeps that
-//      status instead of being dragged back by an unrelated leg finishing.
-//      When it does take effect: if the split right after the one that just
-//      finished already has its own assignment row, the load is already
-//      staged for that next leg -> Scheduled(6); otherwise -> Dropped(13).
-//   3. else, if only the LAST split's tracking is Completed(13) (or no leg
-//      has been dispatched at all yet): the LAST split finishing tracking
-//      does NOT by itself change the load status (Journey 1 step 5 /
-//      Journey 2 step 6 — "load status Completed is a separate step") — so
-//      hold whatever trip status is already there, falling back to
+//   2. else, if the highest split_no whose tracking is Completed(13) is
+//      BELOW the load's true last split — driven by load_stops' split_no
+//      layout, not by which splits happen to have a dispatch assignment yet
+//      (a split can finish while a later split, per the stops layout, has
+//      no assignment at all — that's still "mid-split", not "the last
+//      split, alone, finished") — this is Case 4, "finish a mid-split":
+//      only takes effect if the load's CURRENT trip status is Scheduled(6)
+//      or In Transit(10), OR is already Dropped(13) itself — Dropped is not
+//      a closed state, it's "waiting for the next split to be arranged", so
+//      staging that next split's assignment later must still be able to
+//      promote it to Scheduled (Journey 2 step 4). A load that's already
+//      manually closed out (Cancelled/Completed/Complete-TO-NU/In Pickup
+//      Yard) keeps that status instead of being dragged back by an
+//      unrelated leg finishing. When it does take effect: if the split
+//      right after the one that just finished already has its own
+//      assignment row, the load is already staged for that next leg ->
+//      Scheduled(6); otherwise -> Dropped(13).
+//   3. else, if the load's true LAST split's tracking is Completed(13) (or
+//      no leg has been dispatched at all yet): the LAST split finishing
+//      tracking does NOT by itself change the load status (Journey 1 step 5
+//      / Journey 2 step 6 — "load status Completed is a separate step") —
+//      so hold whatever trip status is already there, falling back to
 //      Scheduled(6) only when nothing has actually been dispatched (plain
 //      assignment, no leg has any tracking value yet -> Case 1).
 //   4. else (no legs at all) -> trip = Open(5).
@@ -149,7 +158,12 @@ async function syncLoadStatus(client, loadId) {
     [loadId]
   );
   const legs = legsRes.rows;
-  const maxSplitNo = legs.length ? legs[legs.length - 1].split_no : null;
+
+  const stopsMaxRes = await client.query(
+    'SELECT MAX(split_no) AS max_split_no FROM load_stops WHERE load_id = $1',
+    [loadId]
+  );
+  const maxSplitNo = stopsMaxRes.rows[0]?.max_split_no ?? null;
 
   const activeLeg = legs.find(
     (l) => l.tracking_status_type_id != null && l.tracking_status_type_id !== TRACKING_STATUS.COMPLETED
@@ -161,18 +175,28 @@ async function syncLoadStatus(client, loadId) {
   } else if (!legs.length) {
     tripStatus = TRIP_STATUS.OPEN;
   } else {
-    const midCompleted = legs.filter(
-      (l) => l.split_no !== maxSplitNo && l.tracking_status_type_id === TRACKING_STATUS.COMPLETED
-    );
-    if (midCompleted.length && [TRIP_STATUS.SCHEDULED, TRIP_STATUS.IN_TRANSIT].includes(currentTripStatus)) {
-      const lastCompletedSplitNo = Math.max(...midCompleted.map((l) => l.split_no));
-      const nextSplitStaged = legs.some((l) => l.split_no === lastCompletedSplitNo + 1);
-      tripStatus = nextSplitStaged ? TRIP_STATUS.SCHEDULED : TRIP_STATUS.DROPPED;
-    } else if (midCompleted.length) {
+    const completedSplitNos = legs
+      .filter((l) => l.tracking_status_type_id === TRACKING_STATUS.COMPLETED)
+      .map((l) => l.split_no);
+    const highestCompletedSplitNo = completedSplitNos.length ? Math.max(...completedSplitNos) : null;
+
+    const manuallyClosed = [TRIP_STATUS.CANCELLED, TRIP_STATUS.COMPLETED, TRIP_STATUS.COMPLETE_TO_NU, TRIP_STATUS.IN_PICKUP_YARD];
+    if (highestCompletedSplitNo != null && highestCompletedSplitNo < maxSplitNo) {
+      if (!manuallyClosed.includes(currentTripStatus)) {
+        // Safe without re-checking this next leg's own tracking value: since
+        // highestCompletedSplitNo is the MAX completed split_no, split_no+1
+        // (if it exists) can't itself be Completed — and if it were actively
+        // in transit, the `activeLeg` branch above would already have
+        // caught it before reaching here.
+        const nextSplitStaged = legs.some((l) => l.split_no === highestCompletedSplitNo + 1);
+        tripStatus = nextSplitStaged ? TRIP_STATUS.SCHEDULED : TRIP_STATUS.DROPPED;
+      } else {
+        tripStatus = currentTripStatus;
+      }
+    } else if (highestCompletedSplitNo != null) {
       tripStatus = currentTripStatus;
     } else {
-      const anyCompleted = legs.some((l) => l.tracking_status_type_id === TRACKING_STATUS.COMPLETED);
-      tripStatus = anyCompleted ? currentTripStatus : TRIP_STATUS.SCHEDULED;
+      tripStatus = TRIP_STATUS.SCHEDULED;
     }
   }
 
