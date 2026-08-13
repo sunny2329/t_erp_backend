@@ -28,7 +28,8 @@ const ASSIGNMENT_FIELD_META = {
   driver_phone: { label: 'Driver Phone', ref: 'text' },
   vehicle_no: { label: 'Vehicle #', ref: 'text' },
   trailer_no: { label: 'Trailer #', ref: 'text' },
-  is_external: { label: 'Dispatch Type', ref: 'dispatchType' }
+  is_external: { label: 'Dispatch Type', ref: 'dispatchType' },
+  dispatch_remark: { label: 'Dispatch Notes', ref: 'text' }
 };
 
 // load_assignments has no aduserid/addtime columns (unlike every other table
@@ -57,7 +58,8 @@ const ASSIGNMENT_CONFIG = {
     'vehicle_no',
     'trailer_no',
     'is_external',
-    'stop_points'
+    'stop_points',
+    'dispatch_remark'
   ],
   hasAduserid: false,
   hasAddtime: false
