@@ -277,15 +277,11 @@ async function fetchStops(loadId) {
   return result.rows;
 }
 
-async function list({ page, search, carrierId }) {
+async function list({ page, search }) {
   const pagination = getPagination({ page: page.page, pageSize: page.pageSize });
   const params = [];
   const conditions = [];
 
-  if (carrierId) {
-    params.push(carrierId);
-    conditions.push(`carrier_id = $${params.length}`);
-  }
   if (search) {
     params.push(`%${search}%`);
     conditions.push(`(load_number ILIKE $${params.length} OR commodity ILIKE $${params.length})`);
