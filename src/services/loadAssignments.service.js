@@ -343,7 +343,13 @@ async function createLeg(loadId, payload, userId) {
 // being marked Completed before it was ever actually dispatched — and
 // deliberately do NOT apply to a mid-split leg (section B has no such
 // gate; that's exactly the action that's allowed to drop the load, see
-// syncLoadStatus).
+// syncLoadStatus). `maxSplitNo` here MUST be the load's true last split —
+// driven by load_stops' split_no layout, same as syncLoadStatus — not by
+// which splits currently happen to have an assignment row. A split can be
+// the only leg that exists yet (load_assignments) while a later split
+// already has stops waiting to be dispatched; that's still mid-split, not
+// "the last split, alone" — getting this from load_assignments instead
+// would wrongly apply the extra gates to a legitimate mid-split completion.
 function assertTrackingCompletionAllowed(before, merged, loadTripStatus, maxSplitNo) {
   if (!merged.complete_dt || !merged.complete_out_dt) {
     throw new AppError('Enter the completion In Time and Out Time before marking this leg Completed.', 400);
@@ -356,11 +362,17 @@ function assertTrackingCompletionAllowed(before, merged, loadTripStatus, maxSpli
   if (loadTripStatus === TRIP_STATUS.DROPPED) {
     throw new AppError('Re-dispatch this load before marking tracking Completed.', 400);
   }
+  // dispatch_carrier_id is NOT NULL at the DB level, so it's already
+  // guaranteed on every leg (company or broker) — checking it here would
+  // never actually fail. What can genuinely still be missing on a broker
+  // leg is the driver/vehicle itself: either a real drivers/vehicles row,
+  // or (more commonly for an external carrier) the free-text driver_name/
+  // vehicle_no fallback fields — see ASSIGNMENT_FIELD_META.
   const hasAssignment = merged.is_external
-    ? Boolean(merged.dispatch_carrier_id)
+    ? Boolean(merged.driver_id1 || merged.driver_name || merged.vehicle_id || merged.vehicle_no)
     : Boolean(merged.driver_id1 || merged.vehicle_id);
   if (!hasAssignment) {
-    throw new AppError('Assign a driver/vehicle (or carrier) before marking tracking Completed.', 400);
+    throw new AppError('Assign a driver/vehicle before marking tracking Completed.', 400);
   }
 }
 
@@ -378,7 +390,7 @@ async function updateLeg(id, payload, userId) {
       : before.tracking_status_type_id;
     if (nextTracking === TRACKING_STATUS.COMPLETED && before.tracking_status_type_id !== TRACKING_STATUS.COMPLETED) {
       const maxSplitRes = await client.query(
-        'SELECT MAX(split_no) AS max_split_no FROM load_assignments WHERE load_id = $1',
+        'SELECT MAX(split_no) AS max_split_no FROM load_stops WHERE load_id = $1',
         [before.load_id]
       );
       assertTrackingCompletionAllowed(
