@@ -108,48 +108,74 @@ async function assertSplitHasStops(client, loadId, splitNo) {
 }
 
 // Rolls the load's own trip_status_type_id / tracking_status_type_id up from
-// its assignment legs and persists it onto the loads row — mirrors the
-// reference Loadx-Youngs-Backend's rollup logic (found in both
-// ss_save_dispatch_load_v4 and the Node-side clearLoadAssignment), which
-// this reproduces exactly rather than the ad-hoc 2-state version this file
-// used to have:
-//   1. ANY leg tracking = In Transit(5)  -> trip = In Transit(10), always,
-//      overriding everything else below.
-//   2. else ANY leg tracking = Completed(13) -> trip = Dropped(13) — a leg
-//      finishing hands the load off, it does NOT mean the whole load is
-//      done (trip=7 "Completed" is a separate, manually-set status — see
-//      loads.service.js LOAD_COLUMNS/LOAD_FIELD_META).
-//   3. else has at least one assignment -> trip = Scheduled(6).
+// its assignment legs and persists it onto the loads row — per the
+// load-status/tracking-status business-logic spec (Cases 1/2/4/5, Journeys
+// 1 & 2), NOT the legacy reference's schema-specific rollup:
+//   1. ANY leg is "actively in transit" -> trip = In Transit(10), always,
+//      overriding everything else below. A leg counts as actively in
+//      transit for ANY non-null tracking value other than Completed(13) —
+//      the tracking vocabulary has many stops between dispatch and
+//      Completed (En Route, At Pickup, ..., Delivered, Detention, ...) and
+//      the load stays In Transit through all of them, not just while the
+//      leg's tracking literally still reads the dispatch value 5.
+//   2. else, if some MID-split (not the highest split_no) leg's tracking is
+//      Completed(13) (Case 4, "finish a mid-split"): only takes effect if
+//      the load's CURRENT trip status is Scheduled(6) or In Transit(10) — a
+//      load that's already Cancelled/Completed/Dropped/Open keeps that
+//      status instead of being dragged back by an unrelated leg finishing.
+//      When it does take effect: if the split right after the one that just
+//      finished already has its own assignment row, the load is already
+//      staged for that next leg -> Scheduled(6); otherwise -> Dropped(13).
+//   3. else, if only the LAST split's tracking is Completed(13) (or no leg
+//      has been dispatched at all yet): the LAST split finishing tracking
+//      does NOT by itself change the load status (Journey 1 step 5 /
+//      Journey 2 step 6 — "load status Completed is a separate step") — so
+//      hold whatever trip status is already there, falling back to
+//      Scheduled(6) only when nothing has actually been dispatched (plain
+//      assignment, no leg has any tracking value yet -> Case 1).
 //   4. else (no legs at all) -> trip = Open(5).
-// loads.tracking_status_type_id mirrors the "active" leg — the reference's
-// LoadDetailDrawer summaryResources rule: the first leg (in split_no order)
-// that hasn't reached Completed(13) yet, or the last leg if every leg is
-// already Completed. This is deliberately NOT just "the last leg" — e.g. a
-// finished split_no=1 sitting ahead of a not-yet-started split_no=2 should
-// still surface split_no=2 (the one actually in play), and it's what keeps
-// this in sync with the trip_status precedence above (an In Transit leg
-// always wins, regardless of its position).
+// loads.tracking_status_type_id mirrors the "active" leg: the first leg (in
+// split_no order) that hasn't reached Completed(13) yet, or the last leg if
+// every leg is already Completed — a finished split_no=1 ahead of a
+// not-yet-started split_no=2 should still surface split_no=2.
 async function syncLoadStatus(client, loadId) {
+  const loadRes = await client.query('SELECT trip_status_type_id FROM loads WHERE id = $1', [loadId]);
+  const currentTripStatus = loadRes.rows[0]?.trip_status_type_id;
+
   const legsRes = await client.query(
-    'SELECT tracking_status_type_id FROM load_assignments WHERE load_id = $1 ORDER BY split_no',
+    'SELECT split_no, tracking_status_type_id FROM load_assignments WHERE load_id = $1 ORDER BY split_no',
     [loadId]
   );
   const legs = legsRes.rows;
-  const trackingIds = legs.map((l) => l.tracking_status_type_id);
+  const maxSplitNo = legs.length ? legs[legs.length - 1].split_no : null;
+
+  const activeLeg = legs.find(
+    (l) => l.tracking_status_type_id != null && l.tracking_status_type_id !== TRACKING_STATUS.COMPLETED
+  );
 
   let tripStatus;
-  if (trackingIds.includes(TRACKING_STATUS.IN_TRANSIT)) {
+  if (activeLeg) {
     tripStatus = TRIP_STATUS.IN_TRANSIT;
-  } else if (trackingIds.includes(TRACKING_STATUS.COMPLETED)) {
-    tripStatus = TRIP_STATUS.DROPPED;
-  } else if (legs.length > 0) {
-    tripStatus = TRIP_STATUS.SCHEDULED;
-  } else {
+  } else if (!legs.length) {
     tripStatus = TRIP_STATUS.OPEN;
+  } else {
+    const midCompleted = legs.filter(
+      (l) => l.split_no !== maxSplitNo && l.tracking_status_type_id === TRACKING_STATUS.COMPLETED
+    );
+    if (midCompleted.length && [TRIP_STATUS.SCHEDULED, TRIP_STATUS.IN_TRANSIT].includes(currentTripStatus)) {
+      const lastCompletedSplitNo = Math.max(...midCompleted.map((l) => l.split_no));
+      const nextSplitStaged = legs.some((l) => l.split_no === lastCompletedSplitNo + 1);
+      tripStatus = nextSplitStaged ? TRIP_STATUS.SCHEDULED : TRIP_STATUS.DROPPED;
+    } else if (midCompleted.length) {
+      tripStatus = currentTripStatus;
+    } else {
+      const anyCompleted = legs.some((l) => l.tracking_status_type_id === TRACKING_STATUS.COMPLETED);
+      tripStatus = anyCompleted ? currentTripStatus : TRIP_STATUS.SCHEDULED;
+    }
   }
 
-  const activeLeg = legs.find((l) => l.tracking_status_type_id !== TRACKING_STATUS.COMPLETED) || legs[legs.length - 1];
-  const trackingStatus = activeLeg ? activeLeg.tracking_status_type_id ?? null : null;
+  const displayLeg = legs.find((l) => l.tracking_status_type_id !== TRACKING_STATUS.COMPLETED) || legs[legs.length - 1];
+  const trackingStatus = displayLeg ? displayLeg.tracking_status_type_id ?? null : null;
 
   await client.query(
     'UPDATE loads SET trip_status_type_id = $2, tracking_status_type_id = $3 WHERE id = $1',
@@ -281,14 +307,61 @@ async function createLeg(loadId, payload, userId) {
   });
 }
 
+// Tracking-status-Completed guard (spec: "Cases that change tracking
+// status", sections A & B). Applies only on an actual transition INTO
+// Completed(13) (a same-value re-save is a no-op, same convention as
+// loads.service.js's manual trip-status gate). Requires the completion
+// in/out time on both mid-split and last-split legs. The extra gates
+// (load must already be dispatched, must carry a real driver/vehicle or
+// carrier assignment) are section-A-only — they exist to stop a leg from
+// being marked Completed before it was ever actually dispatched — and
+// deliberately do NOT apply to a mid-split leg (section B has no such
+// gate; that's exactly the action that's allowed to drop the load, see
+// syncLoadStatus).
+function assertTrackingCompletionAllowed(before, merged, loadTripStatus, maxSplitNo) {
+  if (!merged.complete_dt || !merged.complete_out_dt) {
+    throw new AppError('Enter the completion In Time and Out Time before marking this leg Completed.', 400);
+  }
+  if (before.split_no !== maxSplitNo) return;
+
+  if (loadTripStatus === TRIP_STATUS.SCHEDULED) {
+    throw new AppError('Dispatch this load before marking tracking Completed.', 400);
+  }
+  if (loadTripStatus === TRIP_STATUS.DROPPED) {
+    throw new AppError('Re-dispatch this load before marking tracking Completed.', 400);
+  }
+  const hasAssignment = merged.is_external
+    ? Boolean(merged.dispatch_carrier_id)
+    : Boolean(merged.driver_id1 || merged.vehicle_id);
+  if (!hasAssignment) {
+    throw new AppError('Assign a driver/vehicle (or carrier) before marking tracking Completed.', 400);
+  }
+}
+
 async function updateLeg(id, payload, userId) {
   return withTransaction(async (client) => {
     const existing = await client.query(
-      `SELECT la.*, l.carrier_id FROM load_assignments la JOIN loads l ON l.id = la.load_id WHERE la.id = $1`,
+      `SELECT la.*, l.carrier_id, l.trip_status_type_id FROM load_assignments la JOIN loads l ON l.id = la.load_id WHERE la.id = $1`,
       [id]
     );
     if (!existing.rows.length) throw new AppError('Assignment leg not found', 404);
     const before = existing.rows[0];
+
+    const nextTracking = payload.tracking_status_type_id !== undefined
+      ? (payload.tracking_status_type_id === null ? null : Number(payload.tracking_status_type_id))
+      : before.tracking_status_type_id;
+    if (nextTracking === TRACKING_STATUS.COMPLETED && before.tracking_status_type_id !== TRACKING_STATUS.COMPLETED) {
+      const maxSplitRes = await client.query(
+        'SELECT MAX(split_no) AS max_split_no FROM load_assignments WHERE load_id = $1',
+        [before.load_id]
+      );
+      assertTrackingCompletionAllowed(
+        before,
+        { ...before, ...payload },
+        before.trip_status_type_id,
+        maxSplitRes.rows[0].max_split_no
+      );
+    }
 
     const row = await updateRow(client, ASSIGNMENT_CONFIG, id, withStopPointsJson(payload), userId);
     await syncLoadStatus(client, before.load_id);
@@ -337,6 +410,16 @@ async function deleteLeg(legId, userId) {
     );
     const leg = legRes.rows[0];
     if (!leg) throw new AppError('Assignment leg not found', 404);
+
+    // Case 5 ("Clear assignment"): blocked once this leg's tracking has
+    // moved off null — i.e. it's In Transit(5), Completed(13), or any of the
+    // intermediate values between them (En Route, At Pickup, ..., Delivered,
+    // ...; see syncLoadStatus's "actively in transit" definition). Clearing/
+    // deleting a leg at that point would silently erase a leg the load has
+    // already started or finished.
+    if (leg.tracking_status_type_id != null) {
+      throw new AppError('Cannot clear this assignment — its tracking is already In Transit or Completed.', 400);
+    }
 
     const siblingSplitsRes = await client.query(
       'SELECT DISTINCT split_no FROM load_stops WHERE load_id = $1 AND split_no != $2 ORDER BY split_no',

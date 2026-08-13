@@ -14,13 +14,13 @@ const eventsService = require('./events.service');
 // syncLoadStatus, matching the reference's dispatch-save rollup) AND
 // manually settable here via the Load Status dropdown (matching the
 // reference's separate `ss_save_changeloadstatus` manual path) — whichever
-// wrote it last wins, same as the reference project, EXCEPT for one guard
-// carried over from that same reference function: manually setting In
-// Transit(10) is rejected below (see `update()`) exactly like
-// ss_save_changeloadstatus blocks a 6->10 manual transition ("Cannot change
-// status without dispatching the load") — In Transit must come from an
-// actual dispatch/tracking-status action (loadAssignments.service.js), not
-// a bare field edit.
+// wrote it last wins, same as the reference project, EXCEPT that manual
+// changes are gated by MANUAL_TRIP_STATUS_RULES below (see `update()`),
+// carried over from that same reference function's guard. That reference
+// function ALSO does schema-specific cascade cleanup on some transitions
+// (clearing driver_id/vehicle_id, deleting dispatch_master/load_vehicle_kms
+// rows) tied to legacy-only tables this schema doesn't have — only the
+// transition-legality gate itself is ported, not those side effects.
 
 const LOAD_COLUMNS = [
   'carrier_id',
@@ -49,6 +49,48 @@ const LOAD_COLUMNS = [
   'load_dt',
   'trip_status_type_id'
 ];
+
+// Manual "Load Status" transition legality — ported from the reference
+// Loadx-Youngs-Backend's ss_save_changeloadstatus guard. The throughline
+// across every rule: reaching Scheduled(6) or In Transit(10) must come from
+// an actual dispatch action (loadAssignments.service.js) or the
+// syncLoadStatus rollup it triggers, never a bare manual field edit.
+// `allowedTargets` (Open only) is an allow-list — anything not in it is
+// rejected; `blockedTargets` (everything else) is a deny-list — anything
+// not in it is allowed. A same-value save (before === after) always
+// short-circuits before this table is even consulted, see `update()`.
+const TS = loadAssignmentsService.TRIP_STATUS;
+const MANUAL_TRIP_STATUS_RULES = {
+  [TS.OPEN]: {
+    allowedTargets: [TS.COMPLETED, TS.COMPLETE_TO_NU, TS.CANCELLED],
+    message: 'Cannot change status without assigning a driver and vehicle — dispatch a split instead.'
+  },
+  [TS.SCHEDULED]: {
+    blockedTargets: [TS.IN_TRANSIT, TS.IN_PICKUP_YARD],
+    message: 'Cannot change status without dispatching the load.'
+  },
+  [TS.COMPLETED]: { blockedTargets: [TS.SCHEDULED, TS.IN_TRANSIT], message: 'Cannot dispatch from here.' },
+  [TS.COMPLETE_TO_NU]: { blockedTargets: [TS.SCHEDULED, TS.IN_TRANSIT], message: 'Cannot dispatch from here.' },
+  [TS.IN_PICKUP_YARD]: { blockedTargets: [TS.SCHEDULED, TS.IN_TRANSIT], message: 'Cannot dispatch from here.' },
+  [TS.CANCELLED]: { blockedTargets: [TS.SCHEDULED, TS.IN_TRANSIT], message: 'Cannot dispatch from here.' },
+  [TS.IN_TRANSIT]: {
+    blockedTargets: [TS.CANCELLED, TS.COMPLETE_TO_NU],
+    message: 'Cannot cancel or complete-to-NU an In Transit load.'
+  },
+  [TS.DROPPED]: {
+    blockedTargets: [TS.SCHEDULED, TS.IN_TRANSIT],
+    message: 'Need to dispatch the load from Dropped — cannot set this status directly.'
+  }
+};
+
+function assertLegalManualTripStatusChange(currentStatus, nextStatus) {
+  const rule = MANUAL_TRIP_STATUS_RULES[currentStatus];
+  if (!rule) return;
+  const illegal = rule.allowedTargets
+    ? !rule.allowedTargets.includes(nextStatus)
+    : rule.blockedTargets.includes(nextStatus);
+  if (illegal) throw new AppError(rule.message, 400);
+}
 
 const STOPS_CONFIG = {
   table: 'load_stops',
@@ -346,11 +388,8 @@ async function update(id, payload, userId) {
 
   if (payload.trip_status_type_id !== undefined) {
     const nextTripStatus = Number(payload.trip_status_type_id);
-    if (nextTripStatus === loadAssignmentsService.TRIP_STATUS.IN_TRANSIT && before.trip_status_type_id !== nextTripStatus) {
-      throw new AppError(
-        "Load Status can't be set to In Transit directly — dispatch the split (or set its Tracking Status to In Transit) instead.",
-        400
-      );
+    if (before.trip_status_type_id !== nextTripStatus) {
+      assertLegalManualTripStatusChange(before.trip_status_type_id, nextTripStatus);
     }
   }
 
