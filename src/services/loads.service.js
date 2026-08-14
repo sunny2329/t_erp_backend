@@ -361,7 +361,9 @@ async function create(payload, userId) {
     const load = await insertRow(
       client,
       { table: 'loads', columns: LOAD_COLUMNS },
-      { ...payload, load_number: loadNumber, trip_status_type_id: 5 },
+      // Load Date is no longer a user-entered field — it's set to the
+      // creation time, same as addtime, unless a caller explicitly passes one.
+      { ...payload, load_number: loadNumber, load_dt: payload.load_dt || new Date(), trip_status_type_id: 5 },
       userId
     );
     await upsertStops(client, load.id, payload.stops, userId);
