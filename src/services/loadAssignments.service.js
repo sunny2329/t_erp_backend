@@ -126,17 +126,21 @@ async function assertSplitHasStops(client, loadId, splitNo) {
 //      (a split can finish while a later split, per the stops layout, has
 //      no assignment at all — that's still "mid-split", not "the last
 //      split, alone, finished") — this is Case 4, "finish a mid-split":
-//      only takes effect if the load's CURRENT trip status is Scheduled(6)
-//      or In Transit(10), OR is already Dropped(13) itself — Dropped is not
-//      a closed state, it's "waiting for the next split to be arranged", so
-//      staging that next split's assignment later must still be able to
-//      promote it to Scheduled (Journey 2 step 4). A load that's already
-//      manually closed out (Cancelled/Completed/Complete-TO-NU/In Pickup
-//      Yard) keeps that status instead of being dragged back by an
-//      unrelated leg finishing. When it does take effect: if the split
-//      right after the one that just finished already has its own
-//      assignment row, the load is already staged for that next leg ->
-//      Scheduled(6); otherwise -> Dropped(13).
+//      only takes effect if the load's CURRENT trip status is Scheduled(6),
+//      OR is already Dropped(13) itself — Dropped is not a closed state,
+//      it's "waiting for the next split to be arranged", so staging that
+//      next split's assignment later must still be able to promote it to
+//      Scheduled (Journey 2 step 4). Once the load has actually reached In
+//      Transit(10), a mid-split finishing must NOT auto-drag it back down
+//      to Scheduled/Dropped — that downgrade is dispatcher-visible and has
+//      to be a deliberate manual Load Status change from here on, same as
+//      a load that's already manually closed out
+//      (Cancelled/Completed/Complete-TO-NU/In Pickup Yard) keeps its status
+//      instead of being dragged back by an unrelated leg finishing. When
+//      the auto-transition does take effect (current status Scheduled or
+//      Dropped): if the split right after the one that just finished
+//      already has its own assignment row, the load is already staged for
+//      that next leg -> Scheduled(6); otherwise -> Dropped(13).
 //   3. else, if the load's true LAST split's tracking is Completed(13) (or
 //      no leg has been dispatched at all yet): the LAST split finishing
 //      tracking does NOT by itself change the load status (Journey 1 step 5
@@ -180,9 +184,15 @@ async function syncLoadStatus(client, loadId) {
       .map((l) => l.split_no);
     const highestCompletedSplitNo = completedSplitNos.length ? Math.max(...completedSplitNos) : null;
 
-    const manuallyClosed = [TRIP_STATUS.CANCELLED, TRIP_STATUS.COMPLETED, TRIP_STATUS.COMPLETE_TO_NU, TRIP_STATUS.IN_PICKUP_YARD];
+    // Statuses this mid-split-finish rollup must never auto-move away from —
+    // the four manually-closed statuses (never dragged back by an unrelated
+    // leg finishing) PLUS In Transit(10): once a load has actually started
+    // moving, a mid-split completion is not allowed to silently drop it back
+    // to Scheduled/Dropped. Leaving In Transit is now a deliberate, manual
+    // Load Status change only (see loads.service.js's MANUAL_TRIP_STATUS_RULES).
+    const heldStatuses = [TRIP_STATUS.CANCELLED, TRIP_STATUS.COMPLETED, TRIP_STATUS.COMPLETE_TO_NU, TRIP_STATUS.IN_PICKUP_YARD, TRIP_STATUS.IN_TRANSIT];
     if (highestCompletedSplitNo != null && highestCompletedSplitNo < maxSplitNo) {
-      if (!manuallyClosed.includes(currentTripStatus)) {
+      if (!heldStatuses.includes(currentTripStatus)) {
         // Safe without re-checking this next leg's own tracking value: since
         // highestCompletedSplitNo is the MAX completed split_no, split_no+1
         // (if it exists) can't itself be Completed — and if it were actively
