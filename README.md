@@ -144,7 +144,7 @@ changing any column names.
 GET  /loads/:loadId/documents            list
 POST /loads/:loadId/documents/upload     multipart upload (field: file) -> { url }
 POST /loads/:loadId/documents            create row { doc_name, doc_type_id, doc_url, exp_date }
-POST /loads/:loadId/documents/:id/delete delete row (+ removes the local file if it was served by this API)
+POST /loads/:loadId/documents/:id/delete delete row (+ removes the Storage object if it was served by this API)
 
 GET  /loads/:loadId/notes                list (newest-last, includes added_by)
 POST /loads/:loadId/notes                create { notes }
@@ -156,10 +156,11 @@ Both `documents` and `notes` are generic tables keyed by `(ref_type_id, ref_id,
 carrier_id)` — `ref_type_id = 6` is hardcoded to "Loads" everywhere in this API
 (confirmed against `type_master(type_id=13)`, the entity-type directory, where
 `id=6` is literally "Loads"). `doc_type_id` on documents looks up
-`type_master(type_id=23)` (BOL, POD, Invoice, ...). Files are stored on local
-disk under `uploads/loads/<loadId>/<yyyymm>/` and served statically at
-`/uploads/...` (outside the API prefix, like `/health`) — there is no S3/cloud
-storage wired up, unlike the reference Loadx-Youngs project.
+`type_master(type_id=23)` (BOL, POD, Invoice, ...). Files are stored in
+Supabase Storage (same Supabase project as the DB) under
+`loads/<loadId>/<yyyymm>/` in a public bucket, keyed off `SUPABASE_URL` /
+`SUPABASE_SERVICE_ROLE_KEY` / `SUPABASE_STORAGE_BUCKET` — not local disk,
+since Render's free-tier filesystem is wiped on every redeploy/spin-down.
 
 ## Load PDFs (Customer Confirmation / Load Confirmation / BOL) + Rate Con email
 
@@ -179,7 +180,8 @@ PUT  /loads/erate/:token                        PUBLIC, no auth — { assignment
 
 PDFs are generated in-process with `jsPDF` (no Puppeteer/HTML templates —
 programmatic vector drawing, `src/utils/pdf/*.js`), then persisted the same
-way as manual document uploads: saved under `uploads/loads/...` and a
+way as manual document uploads: saved to Supabase Storage under
+`loads/...` and a
 `documents` row created with `doc_type_id` 1 (BOL) or 4 (Confirmation — both
 Customer and Load Confirmation use 4, distinguished by `doc_name`, matching
 the reference project's own numbering).

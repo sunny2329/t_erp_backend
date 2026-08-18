@@ -128,10 +128,10 @@ async function buildBOL(loadId, carrierId, assignmentId) {
 // latest Load Confirmation PDF for this specific dispatched leg" without
 // needing a dedicated FK column (mirrors the reference project's `_DID_`
 // trick for the same problem).
-async function persistDocument(req, { loadId, carrierId, userId, buffer, docType, docNamePrefix, loadNumber, assignmentId }) {
+async function persistDocument({ loadId, carrierId, userId, buffer, docType, docNamePrefix, loadNumber, assignmentId }) {
   const suffix = assignmentId ? `_AID_${assignmentId}` : '';
   const filename = `${Date.now()}-${docNamePrefix}.pdf`;
-  const url = saveGeneratedFile(req, loadId, filename, buffer);
+  const url = await saveGeneratedFile(loadId, filename, buffer);
   const docName = `${docNamePrefix}_${loadNumber || loadId}${suffix}`;
 
   const row = await documentsService.createForLoad(

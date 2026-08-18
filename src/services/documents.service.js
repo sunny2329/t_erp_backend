@@ -1,8 +1,7 @@
-const fs = require('fs');
-const path = require('path');
 const { query, pool } = require('../config/database');
 const { insertRow } = require('../utils/sqlBuilders');
 const { AppError } = require('../utils/AppError');
+const { deleteFromSupabase } = require('./uploads.service');
 
 // documents.ref_type_id is a generic entity-type discriminator (not itself a
 // type_master row) — verified against the live data: type_master(type_id=13)
@@ -49,28 +48,16 @@ async function createForLoad(loadId, payload, userId, carrierId) {
   );
 }
 
-// Best-effort local-disk cleanup — only removes files this API itself served
-// under /uploads (external/S3-style URLs are left alone).
-function deleteLocalUploadIfOwned(docUrl) {
-  try {
-    const marker = '/uploads/';
-    const idx = String(docUrl || '').indexOf(marker);
-    if (idx === -1) return;
-    const relative = docUrl.slice(idx + marker.length).split(/[?#]/)[0];
-    const filePath = path.join(__dirname, '..', '..', 'uploads', relative);
-    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-  } catch (_) {
-    // never fail the delete request over a filesystem cleanup issue
-  }
-}
-
 async function removeForLoad(id, loadId, carrierId) {
   const result = await query(
     `DELETE FROM documents WHERE id = $1 AND ref_type_id = $2 AND ref_id = $3 AND carrier_id = $4 RETURNING doc_name, doc_type_id, doc_url`,
     [id, LOAD_REF_TYPE_ID, loadId, carrierId]
   );
   if (!result.rows.length) throw new AppError('Document not found', 404);
-  deleteLocalUploadIfOwned(result.rows[0].doc_url);
+  // Best-effort — never fail the delete request over a storage cleanup issue.
+  try {
+    await deleteFromSupabase(result.rows[0].doc_url);
+  } catch (_) {}
   return result.rows[0];
 }
 

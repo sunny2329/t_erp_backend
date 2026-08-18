@@ -15,6 +15,7 @@ module.exports = createSimpleCrudService({
     'address_line1',
     'address_line2',
     'city_id',
+    'zip_code',
     'isd_code',
     'phone',
     'phone_ext',

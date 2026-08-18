@@ -12,7 +12,7 @@ const send = asyncHandler(async (req, res) => {
   const { assignmentId } = req.body;
 
   const { load, buffer, dispatchCarrier } = await pdfService.buildLoadConfirmation(loadId, req.user.carrierId, assignmentId);
-  await pdfService.persistDocument(req, {
+  await pdfService.persistDocument({
     loadId,
     carrierId: req.user.carrierId,
     userId: req.user.id,

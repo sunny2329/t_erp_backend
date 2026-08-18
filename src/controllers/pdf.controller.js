@@ -24,7 +24,7 @@ const customerConfirmation = asyncHandler(async (req, res) => {
 
   let docUrl = null;
   if (!isViewOnly(req)) {
-    const doc = await pdfService.persistDocument(req, {
+    const doc = await pdfService.persistDocument({
       loadId,
       carrierId: req.user.carrierId,
       userId: req.user.id,
@@ -46,7 +46,7 @@ async function loadConfirmationHandler(req, res) {
   const { buffer, load } = await pdfService.buildLoadConfirmation(loadId, req.user.carrierId, assignmentId || null);
 
   if (!isViewOnly(req)) {
-    const doc = await pdfService.persistDocument(req, {
+    const doc = await pdfService.persistDocument({
       loadId,
       carrierId: req.user.carrierId,
       userId: req.user.id,
@@ -68,7 +68,7 @@ async function bolHandler(req, res) {
   const { buffer, load } = await pdfService.buildBOL(loadId, req.user.carrierId, assignmentId || null);
 
   if (!isViewOnly(req)) {
-    const doc = await pdfService.persistDocument(req, {
+    const doc = await pdfService.persistDocument({
       loadId,
       carrierId: req.user.carrierId,
       userId: req.user.id,
